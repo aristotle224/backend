@@ -31,7 +31,7 @@ import { submitSignedTransaction } from '../../../lib/stellar/transactions';
 const mockPrisma = {
   creator: { findUnique: vi.fn(), update: vi.fn() },
   user: { findUnique: vi.fn() },
-  wallet: { findFirst: vi.fn() },
+  wallet: { findFirst: vi.fn(), updateMany: vi.fn() },
   stellarAsset: { findFirst: vi.fn() },
   walletFlag: { findFirst: vi.fn() },
   accountFreeze: { findFirst: vi.fn() },
@@ -84,6 +84,8 @@ describe('createTip idempotency (#48)', () => {
       id: 'wallet-1',
       publicKey: 'GABC',
       verified: true,
+      balance: 1000,
+      balanceVersion: 0,
     });
     mockPrisma.walletFlag.findFirst.mockResolvedValue(null);
     mockPrisma.accountFreeze.findFirst.mockResolvedValue(null);
@@ -94,6 +96,7 @@ describe('createTip idempotency (#48)', () => {
       enabled: true,
       priority: 100,
     });
+    mockPrisma.wallet.updateMany.mockResolvedValue({ count: 1 });
   });
 
   it('returns the original tip when an idempotency key is replayed', async () => {

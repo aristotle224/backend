@@ -172,7 +172,7 @@ export class PaymentService extends BaseService {
           userId,
           verified: true,
         },
-        select: { id: true, publicKey: true },
+        select: { id: true, publicKey: true, balance: true, balanceVersion: true },
       });
 
       if (!wallet) {
@@ -277,6 +277,66 @@ export class PaymentService extends BaseService {
 
       if (attachableMedia.length !== mediaIds.length) {
         throw new ValidationError('One or more media items are not ready to be attached');
+      }
+
+      // #186 — Reserve funds against the cached wallet balance with optimistic
+      // locking so concurrent tips from the same wallet cannot double-spend.
+      // The update only commits if the balance version still matches what we
+      // read; a mismatch means another tip already debited the wallet.
+      const cachedBalance = wallet.balance ?? 0;
+      if (cachedBalance < data.amount) {
+        logger.warn(
+          {
+            userId,
+            walletPublicKey: wallet.publicKey,
+            requiredAmount: data.amount,
+            currentBalance: cachedBalance,
+            currency: assetCode,
+            failureReason: 'insufficient_balance',
+          },
+          'Tip blocked: insufficient cached wallet balance'
+        );
+        throw new PaymentRequiredError('Insufficient funds to complete the payment', {
+          requiredAmount: data.amount,
+          currentBalance: cachedBalance,
+          currency: assetCode,
+        });
+      }
+
+      const maxBalanceRetries = 3;
+      let balanceVersion = wallet.balanceVersion ?? 0;
+      for (let attempt = 0; attempt <= maxBalanceRetries; attempt++) {
+        const updated = await this.prisma.wallet.updateMany({
+          where: { id: wallet.id, balanceVersion },
+          data: { balance: { decrement: data.amount }, balanceVersion: { increment: 1 } },
+        });
+        if (updated.count === 1) {
+          break;
+        }
+        // Another writer debited the wallet first: refresh the cached balance
+        // and version, re-validate, and retry. Reject with a clear error when
+        // funds no longer cover the tip or retries are exhausted.
+        if (attempt === maxBalanceRetries) {
+          throw new ConflictError('Wallet balance was updated concurrently; please retry the tip', {
+            walletId: wallet.id,
+            hint: 'Refresh the wallet balance and retry the tip.',
+          });
+        }
+        const refreshed = await this.prisma.wallet.findUnique({
+          where: { id: wallet.id },
+          select: { balance: true, balanceVersion: true },
+        });
+        if (!refreshed) {
+          throw new NotFoundError('Wallet');
+        }
+        if ((refreshed.balance ?? 0) < data.amount) {
+          throw new PaymentRequiredError('Insufficient funds to complete the payment', {
+            requiredAmount: data.amount,
+            currentBalance: refreshed.balance ?? 0,
+            currency: assetCode,
+          });
+        }
+        balanceVersion = refreshed.balanceVersion ?? 0;
       }
 
       // Create tip in pending state

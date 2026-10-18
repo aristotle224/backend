@@ -231,6 +231,12 @@ model Wallet {
   name      String?
   verified  Boolean @default(false)
 
+  // Cached on-chain balance (lumens/XLM units, mirrored from Stellar). Used to
+  // validate tips without a network round-trip; guarded by balanceVersion below
+  // so concurrent tips cannot double-spend against a stale cached value (#186).
+  balance        Float   @default(0)
+  balanceVersion Int     @default(0)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
