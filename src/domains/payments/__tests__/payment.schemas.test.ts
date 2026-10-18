@@ -9,10 +9,12 @@ import {
   TipHistoryQuerySchema,
   buildPaymentTransactionJsonSchema,
   createTipJsonSchema,
+  validateWhitelistedAsset,
+  validatePaymentAsset,
 } from '../payment.schemas';
 import { MEMO_MAX_LENGTH } from '../../../lib/stellar/validation';
 import { validateRequest } from '../../../middleware/validation';
-import { AppError } from '../../../utils/errors';
+import { AppError, ValidationError } from '../../../utils/errors';
 
 const validPublicKey = Keypair.random().publicKey();
 
@@ -258,3 +260,72 @@ describe('derived OpenAPI schemas', () => {
     expect(schema.required ?? []).not.toContain('memo');
   });
 });
+
+describe('validateWhitelistedAsset (#185)', () => {
+  const mockStellarAsset = {
+    findFirst: vi.fn(),
+  };
+  const mockDb = { stellarAsset: mockStellarAsset };
+
+  it('accepts a whitelisted asset code and issuer', async () => {
+    mockStellarAsset.findFirst.mockResolvedValueOnce({
+      id: 'asset-1',
+      code: 'USDC',
+      issuer: validPublicKey,
+      enabled: true,
+    });
+
+    const asset = await validateWhitelistedAsset('USDC', validPublicKey, mockDb);
+    expect(asset).toBeDefined();
+    expect(asset.code).toBe('USDC');
+    expect(mockStellarAsset.findFirst).toHaveBeenCalledWith({
+      where: {
+        code: 'USDC',
+        issuer: validPublicKey,
+        enabled: true,
+      },
+    });
+  });
+
+  it('accepts whitelisted native XLM with null issuer', async () => {
+    mockStellarAsset.findFirst.mockResolvedValueOnce({
+      id: 'asset-xlm',
+      code: 'XLM',
+      issuer: null,
+      enabled: true,
+    });
+
+    const asset = await validatePaymentAsset('XLM', null, mockDb);
+    expect(asset.code).toBe('XLM');
+  });
+
+  it('rejects unsupported asset codes with 400 ValidationError', async () => {
+    mockStellarAsset.findFirst.mockResolvedValueOnce(null);
+
+    await expect(validateWhitelistedAsset('UNSUPPORTED', validPublicKey, mockDb)).rejects.toThrow(
+      ValidationError
+    );
+  });
+
+  it('rejects unsupported asset issuers with 400 ValidationError', async () => {
+    mockStellarAsset.findFirst.mockResolvedValueOnce(null);
+
+    const maliciousIssuer = Keypair.random().publicKey();
+    await expect(validateWhitelistedAsset('USDC', maliciousIssuer, mockDb)).rejects.toThrow(
+      ValidationError
+    );
+  });
+
+  it('rejects malformed asset code format with 400', async () => {
+    await expect(validateWhitelistedAsset('TOOLONGASSETCODE123', validPublicKey, mockDb)).rejects.toThrow(
+      ValidationError
+    );
+  });
+
+  it('rejects invalid issuer public key with 400', async () => {
+    await expect(validateWhitelistedAsset('USDC', 'NOT_A_VALID_KEY', mockDb)).rejects.toThrow(
+      ValidationError
+    );
+  });
+});
+

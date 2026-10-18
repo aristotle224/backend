@@ -242,6 +242,12 @@ export const EnvSchemaObject = z.object({
   CORS_ORIGINS: optionalString,
   CORS_CREDENTIALS: bool(true),
   CORS_MAX_AGE: int(600, { min: 0, max: 86_400 }),
+  // Request timeout middleware (issue #206): a request still running past
+  // this returns 504 instead of hanging indefinitely. Auth endpoints get a
+  // tighter budget since they do far less work per request than a listing
+  // or search query.
+  REQUEST_TIMEOUT_MS: int(30_000, { min: 100, max: 300_000 }),
+  AUTH_REQUEST_TIMEOUT_MS: int(5_000, { min: 100, max: 60_000 }),
 
   // ── Rate limiting (see src/config/rate-limit.ts) ───────────────────────
   RATE_LIMIT_ENABLED: bool(true),

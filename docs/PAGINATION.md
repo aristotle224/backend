@@ -134,6 +134,32 @@ Example:
 GET /api/v1/transactions/history?status=completed&page=1&pageSize=20 HTTP/1.1
 ```
 
+### Date Range Filters and Timezone
+
+`minDate` / `maxDate` on `/api/v1/transactions/history` and
+`/api/v1/transactions/creator/:creatorId` filter on `createdAt` and accept
+any parseable date-time.
+
+- If the value includes an explicit UTC offset (`Z`, `+05:00`, `-0500`), it
+  is used as-is and `timezone` is not consulted.
+- If the value has **no** offset (e.g. `2026-01-15` or
+  `2026-01-15T00:00:00`), it is interpreted as UTC midnight **unless** an
+  optional `timezone` query parameter is also given, in which case it is
+  interpreted as local wall-clock time in that IANA timezone
+  (e.g. `America/New_York`) and converted to UTC before querying.
+- When `timezone` is supplied, every `createdAt`/`updatedAt` timestamp in
+  the response is also formatted with that timezone's offset instead of
+  `Z`, so a client doesn't have to re-convert the response to show the
+  same local day the request asked for.
+- An unrecognized `timezone` value (not a valid IANA identifier) is
+  rejected with a `400 VALIDATION_ERROR`.
+
+Example — tips created on January 15th, Eastern time, regardless of what
+UTC date that spans:
+```http
+GET /api/v1/transactions/history?minDate=2026-01-15T00:00:00&maxDate=2026-01-15T23:59:59&timezone=America/New_York HTTP/1.1
+```
+
 ---
 
 ## 7. Error Handling

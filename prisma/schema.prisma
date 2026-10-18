@@ -13,6 +13,7 @@ model User {
   password                String
   name                    String?
   bio                     String?
+  phoneNumber             String?
   avatar                  String?
   role                    String    @default("fan")
   verified                Boolean   @default(false)
@@ -36,6 +37,7 @@ model User {
   referralCode        ReferralCode?
   referrals           Referral[]            @relation("RefereeUser")
   referralCommissions ReferralCommission[]  @relation("ReferrerUser")
+  scheduledDeletions  ScheduledAccountDeletion[]
 }
 
 model TwoFactorAuth {
@@ -44,9 +46,13 @@ model TwoFactorAuth {
   user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   secret      String
   backupCodes String[]
-  enabled     Boolean  @default(false)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  // Set once the user has confirmed, by submitting one backup code back,
+  // that they actually saved the set issued at setup (issue #214).
+  // `enable()` refuses to turn 2FA on until this is true.
+  backupCodesConfirmed Boolean  @default(false)
+  enabled              Boolean  @default(false)
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
 }
 
 model TrustedDevice {
@@ -153,6 +159,7 @@ model Creator {
   freezes              AccountFreeze[]
   payments             Payment[]
   payouts              Payout[]
+  scheduledPayments    ScheduledPayment[]
   verificationRequests CreatorVerificationRequest[]
   verificationEvents   CreatorVerificationEvent[]
 
@@ -171,6 +178,7 @@ model Creator {
   @@index([isPublic, verified, totalEarnings(sort: Desc)], map: "idx_creator_public_verified_earnings")
   // Global top-earners ranking (no filters).
   @@index([totalEarnings(sort: Desc)], map: "idx_creator_totalEarnings")
+  @@unique([username], map: "uniq_creator_username")
 }
 
 model CreatorVerificationRequest {
@@ -1203,4 +1211,82 @@ model ModerationAction {
   @@index([targetType, targetId, createdAt], map: "idx_moderationAction_target_createdAt")
   @@index([reportId, createdAt], map: "idx_moderationAction_report_createdAt")
   @@index([action, createdAt], map: "idx_moderationAction_action_createdAt")
+}
+
+// ─── GDPR account deletion (#220) ────────────────────────────────────────────
+
+enum ScheduledDeletionStatus {
+  pending
+  cancelled
+  completed
+}
+
+// A password-confirmed account deletion request. The deletion itself is not
+// immediate: it is queued (BullMQ delayed job, keyed by `id`) to run
+// `GDPR_DELETION_GRACE_DAYS` (30) days after `requestedAt`, and can be
+// cancelled any time before `scheduledFor` via the link in the confirmation
+// email (`cancellationToken`).
+model ScheduledAccountDeletion {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  status ScheduledDeletionStatus @default(pending)
+
+  requestedAt  DateTime
+  scheduledFor DateTime
+
+  // Opaque token embedded in the cancellation link sent by email. Hashed at
+  // rest (same pattern as password reset tokens) so a leaked database row
+  // cannot be used to cancel someone else's deletion.
+  cancellationTokenHash String @unique
+
+  cancelledAt DateTime?
+  completedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId, status])
+  @@index([status, scheduledFor])
+}
+
+// ─── Scheduled payouts (#222) ────────────────────────────────────────────────
+
+enum ScheduledPaymentStatus {
+  active
+  paused
+  cancelled
+}
+
+// A recurring payout a creator has configured for themselves (daily, weekly,
+// monthly, or a custom cron expression). The actual recurrence is driven by a
+// BullMQ repeatable job keyed by this row's id (see
+// src/domains/creators/scheduled-payout.service.ts and
+// src/lib/workers/scheduled-payout.worker.ts): this row is the durable record
+// of what was configured and its run history, not the scheduling mechanism
+// itself.
+model ScheduledPayment {
+  id        String  @id @default(cuid())
+  creatorId String
+  creator   Creator @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+
+  amount        Float
+  walletAddress String?
+
+  // Standard 5-field cron expression (minute hour day-of-month month
+  // day-of-week), e.g. "0 0 * * *" for daily at midnight.
+  cronExpression String
+
+  status ScheduledPaymentStatus @default(active)
+
+  lastRunAt    DateTime?
+  lastPayoutId String?
+  lastRunError String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([creatorId, status])
+  @@index([status])
 }

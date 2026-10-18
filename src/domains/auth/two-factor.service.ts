@@ -24,15 +24,49 @@ export class TwoFactorService {
     const secret = base32(randomBytes(20));
     const plainBackupCodes = Array.from({ length: 10 }, () => randomBytes(6).toString('hex'));
     const backupCodes = await Promise.all(plainBackupCodes.map((code) => bcrypt.hash(code, 10)));
-    await this.prisma.twoFactorAuth.upsert({ where: { userId }, create: { userId, secret, backupCodes }, update: { secret, backupCodes, enabled: false } });
+    await this.prisma.twoFactorAuth.upsert({ where: { userId }, create: { userId, secret, backupCodes, backupCodesConfirmed: false }, update: { secret, backupCodes, enabled: false, backupCodesConfirmed: false } });
     await this.event(userId, 'setup', true);
     const label = encodeURIComponent(`Dorisio:${user.email}`);
+    // backupCodes is returned here, once, so the user can save them before
+    // enabling 2FA (issue #214) — confirmOneBackupCode is how they prove
+    // they actually did before enable() will let them turn 2FA on.
     return { secret, backupCodes: plainBackupCodes, otpauthUrl: `otpauth://totp/${label}?secret=${secret}&issuer=Dorisio&algorithm=SHA1&digits=6&period=30` };
+  }
+  /**
+   * Confirm the user saved their backup codes by submitting one back
+   * (issue #214). Deliberately does not consume the code — confirmation
+   * proves possession of the saved set, it is not a real use of a backup
+   * code — so all 10 remain available for an actual future 2FA recovery.
+   */
+  async confirmBackupCodes(userId: string, code: string) {
+    const record = await this.prisma.twoFactorAuth.findUnique({ where: { userId } });
+    const matches = !!record && (await Promise.all(record.backupCodes.map((hash) => bcrypt.compare(code, hash)))).some(Boolean);
+    if (!matches) { await this.event(userId, 'confirm_backup_codes', false); throw new ValidationError('Invalid backup code'); }
+    await this.prisma.twoFactorAuth.update({ where: { userId }, data: { backupCodesConfirmed: true } }); await this.event(userId, 'confirm_backup_codes', true); return { confirmed: true };
   }
   async enable(userId: string, code: string) {
     const record = await this.prisma.twoFactorAuth.findUnique({ where: { userId } });
-    if (!record || !verifyTotp(record.secret, code)) { await this.event(userId, 'enable', false); throw new ValidationError('Invalid authenticator code'); }
+    if (!record || !record.backupCodesConfirmed) { await this.event(userId, 'enable', false); throw new ValidationError('Confirm your backup codes before enabling two-factor authentication'); }
+    if (!verifyTotp(record.secret, code)) { await this.event(userId, 'enable', false); throw new ValidationError('Invalid authenticator code'); }
     await this.prisma.twoFactorAuth.update({ where: { userId }, data: { enabled: true } }); await this.event(userId, 'enable', true); return { enabled: true };
+  }
+  /**
+   * Issue a fresh set of backup codes, replacing the current one (issue
+   * #214's "download" path). The original codes are bcrypt-hashed and
+   * cannot be recovered, so "download" means regenerate: proving
+   * possession of a valid 2FA code first, same as any other sensitive 2FA
+   * operation. Regenerating resets `backupCodesConfirmed` to false, so the
+   * new set must be confirmed before 2FA stays enabled.
+   */
+  async regenerateBackupCodes(userId: string, code: string) {
+    const record = await this.prisma.twoFactorAuth.findUnique({ where: { userId } });
+    const valid = !!record && (verifyTotp(record.secret, code) || await this.consumeBackupCode(record, code));
+    if (!valid) { await this.event(userId, 'regenerate_backup_codes', false); throw new ValidationError('Invalid two-factor code'); }
+    const plainBackupCodes = Array.from({ length: 10 }, () => randomBytes(6).toString('hex'));
+    const backupCodes = await Promise.all(plainBackupCodes.map((plain) => bcrypt.hash(plain, 10)));
+    await this.prisma.twoFactorAuth.update({ where: { userId }, data: { backupCodes, backupCodesConfirmed: false } });
+    await this.event(userId, 'regenerate_backup_codes', true);
+    return { backupCodes: plainBackupCodes };
   }
   async disable(userId: string, code: string) {
     const record = await this.prisma.twoFactorAuth.findUnique({ where: { userId } });

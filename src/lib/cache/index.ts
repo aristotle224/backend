@@ -47,11 +47,18 @@ const stats = {
 /**
  * Apply probabilistic early expiration jitter (±10%)
  * This prevents thundering herd by spreading out cache expiration times
+ *
+ * Rounded to a whole millisecond (issue #217): Redis's `PX` option requires
+ * an integer, and the un-rounded value here is a float the vast majority of
+ * the time, which `redis` v4's `SET ... PX <float>` rejects with
+ * "ERR value is not an integer or out of range" — silently falling back to
+ * the in-memory cache every single call, for every cache type, since this
+ * function sits in the one jitter path `set()` always runs through.
  */
 function applyJitter(ttlMs: number): number {
   const jitter = ttlMs * 0.1; // 10% jitter
   const randomJitter = (Math.random() - 0.5) * 2 * jitter; // -10% to +10%
-  return Math.max(ttlMs + randomJitter, ttlMs * 0.5); // Minimum 50% of original TTL
+  return Math.round(Math.max(ttlMs + randomJitter, ttlMs * 0.5)); // Minimum 50% of original TTL
 }
 
 /**

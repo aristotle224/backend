@@ -12,7 +12,10 @@ import {
   getPoolMetrics,
   getCircuitBreaker,
 } from './db';
-import { createInstrumentedPrismaClient, getPrismaPerformanceMonitor } from './db/prisma-performance';
+import {
+  createInstrumentedPrismaClient,
+  getPrismaPerformanceMonitor,
+} from './db/prisma-performance';
 import { getCircuitBreakerSnapshots as getExternalBreakerSnapshots } from './lib/circuit-breaker';
 import { registerAuthRoutes } from './domains/auth/auth.routes';
 import { registerTwoFactorRoutes } from './domains/auth/two-factor.routes';
@@ -20,9 +23,13 @@ import { registerWalletRoutes } from './domains/auth/wallet.routes';
 import { registerPaymentRoutes } from './domains/payments/payment.routes';
 import { registerChargeRoutes } from './domains/payments/charge.routes';
 import { registerUserRoutes } from './domains/users/user.routes';
+import { registerAuditLogRoutes } from './domains/users/audit.routes';
 import { registerCreatorPayoutRoutes } from './domains/creators/payout.routes';
+import { registerCreatorTierRoutes } from './domains/creators/tier.routes';
 import { registerTeamRoutes } from './domains/teams/team.routes';
 import { registerWebhookRoutes } from './domains/webhooks/webhook.routes';
+import { registerDeveloperKeyRoutes } from './domains/developers/api-key.routes';
+import { initApiKeyAuth } from './domains/developers/api-key-auth';
 import { registerIncomingWebhookRoutes } from './domains/webhooks/webhook-incoming.routes';
 import { registerAnalyticsRoutes } from './domains/analytics/analytics.routes';
 import { registerAdminRoutes } from './domains/admin/admin.routes';
@@ -48,14 +55,19 @@ import { logger } from './utils/logger';
 import { registerRateLimiting } from './plugins/rateLimit';
 import { registerResponseOptimization } from './plugins/responseOptimization';
 import { swaggerConfig } from './config/swagger';
+import { registerCsrfProtection } from './middleware/csrf';
 import { registerSecurityPlugins } from './plugins/security';
 import { registerApiVersioning } from './plugins/apiVersion';
+import { registerRequestTimeout } from './middleware/timeout';
 import { globalErrorHandler, notFoundHandler } from './middleware/error-handler';
 import { registerGraphQL } from './graphql/plugin';
 import { createCreatorTierRuntime } from './domains/creators/tier.runtime';
 import { registerRequestLogging } from './plugins/requestLogging';
 import { resolveRequestId } from './lib/requestContext';
-import { startCacheInvalidationSubscriber, stopCacheInvalidationSubscriber } from './lib/cache/invalidation';
+import {
+  startCacheInvalidationSubscriber,
+  stopCacheInvalidationSubscriber,
+} from './lib/cache/invalidation';
 
 // Behind a reverse proxy, TRUST_PROXY makes request.ip the real client
 // address instead of the proxy's, so per-IP rate limits don't bucket every
@@ -106,14 +118,20 @@ app.register(cookie, {
   secret: config.JWT_SECRET,
 });
 
+// CSRF protection (#191) must be added before routes so it covers them all.
+registerCsrfProtection(app);
+
 // Register routes
 registerAuthRoutes(app, prisma);
 registerTwoFactorRoutes(app, prisma);
 registerWalletRoutes(app, prisma);
 registerPaymentRoutes(app, prisma);
 registerUserRoutes(app, prisma);
+registerAuditLogRoutes(app, prisma);
 registerCreatorPayoutRoutes(app, prisma);
+registerScheduledPayoutRoutes(app, prisma);
 registerWebhookRoutes(app, prisma);
+registerDeveloperKeyRoutes(app, prisma);
 registerIncomingWebhookRoutes(app, prisma);
 registerAnalyticsRoutes(app, prisma);
 registerNotificationRoutes(app, prisma);
@@ -265,7 +283,13 @@ process.on('SIGINT', () => {
 const bootstrap = async (): Promise<void> => {
   await registerSecurityPlugins(app);
 
+  // Request timeout (#206): registered before any route-level hooks or
+  // handlers so the deadline covers the full request lifecycle, not just
+  // whatever runs after it.
+  registerRequestTimeout(app);
+
   await initTokenBlacklist(prisma);
+  initApiKeyAuth(prisma);
   await startCacheInvalidationSubscriber();
 
   // API versioning (#25): validates an optional API-Version header against
@@ -281,6 +305,7 @@ const bootstrap = async (): Promise<void> => {
   registerChargeRoutes(app, prisma);
   registerUserRoutes(app, prisma);
   registerCreatorPayoutRoutes(app, prisma);
+  registerScheduledPayoutRoutes(app, prisma);
   registerTeamRoutes(app, prisma);
   registerGraphQL(app);
   registerAssetRoutes(app, prisma);

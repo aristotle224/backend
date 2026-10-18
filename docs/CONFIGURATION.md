@@ -210,6 +210,8 @@ See `src/lib/circuit-breaker/` (issue #22).
 | `CORS_ORIGINS`     | string | —       | `*` or comma separated origins                    | no     | ✅         | Browser origin allowlist (see `getCorsOrigins`)                             |
 | `CORS_CREDENTIALS` | bool   | `true`  | —                                                 | no     | ✅         | `Access-Control-Allow-Credentials`                                          |
 | `CORS_MAX_AGE`     | int    | `600`   | 0–86400                                           | no     | ✅         | Preflight cache (seconds)                                                   |
+| `REQUEST_TIMEOUT_MS` | int  | `30000` | 100–300000                                        | no     | ✅         | A request still running past this returns 504 (issue #206)                 |
+| `AUTH_REQUEST_TIMEOUT_MS` | int | `5000` | 100–60000                                    | no     | ✅         | Tighter timeout for `/api/v1/auth/*` routes (issue #206)                    |
 
 ## Rate limiting
 

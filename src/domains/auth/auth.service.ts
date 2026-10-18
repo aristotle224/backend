@@ -1,7 +1,8 @@
+import { generateCsrfToken } from '../../middleware/csrf';
 import { Prisma, PrismaClient } from '@prisma/client';
 import { BaseService } from '../../services/base.service';
 import { LoginRequest, PasswordResetConfirmRequestSchema, RegisterRequest } from './auth.types';
-import { TooManyRequestsError, ValidationError } from '../../utils/errors';
+import { ConflictError, TooManyRequestsError, ValidationError } from '../../utils/errors';
 import { generateAccessToken, generateRefreshToken } from '../../utils/jwt';
 import { hashPassword, comparePasswords } from '../../utils/password';
 import { blacklistRefreshToken } from '../../utils/token-blacklist';
@@ -30,19 +31,31 @@ export class AuthService extends BaseService {
       });
 
       if (existingUser) {
-        throw new ValidationError('Email already registered');
+        throw new ConflictError('Email already taken');
       }
 
       const hashedPassword = await hashPassword(data.password);
 
-      const user = await this.prisma.user.create({
-        data: {
-          email: data.email,
-          password: hashedPassword,
-          name: data.name,
-          role: 'fan',
-        },
-      });
+      let user;
+      try {
+        user = await this.prisma.user.create({
+          data: {
+            email: data.email,
+            password: hashedPassword,
+            name: data.name,
+            role: 'fan',
+          },
+        });
+      } catch (error: any) {
+        if (
+          error?.code === 'P2002' ||
+          (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') ||
+          error?.message?.includes('Unique constraint failed')
+        ) {
+          throw new ConflictError('Email already taken');
+        }
+        throw error;
+      }
 
       // Send verification email
       await this.sendVerificationEmail(user.id, user.email, user.name);
@@ -118,6 +131,17 @@ export class AuthService extends BaseService {
               where: { email: { equals: email, mode: 'insensitive' } },
               select: { id: true, email: true, name: true },
             });
+            if (!user) {
+              const unverified = await (tx as any).pendingEmailChange?.findFirst({
+                where: { newEmail: email, verifiedAt: null },
+              });
+              if (unverified) {
+                logger.warn(
+                  { emailFingerprint: emailFingerprint(email), userId: unverified.userId },
+                  'Flagged attempted password reset to account with unverified email'
+                );
+              }
+            }
             await tx.passwordResetToken.create({
               data: {
                 email,
@@ -284,6 +308,7 @@ export class AuthService extends BaseService {
     user: { id: string; email: string; name: string | null; role: string };
     accessToken: string;
     refreshToken: string;
+    csrfToken: string;
   }> {
     return this.executeWithLogging('user.login', async () => {
       const user = await this.prisma.user.findUnique({
@@ -291,7 +316,23 @@ export class AuthService extends BaseService {
       });
 
       if (!user) {
-        await (this.prisma as any).authAttempt?.create({ data: { email: data.email, ipAddress: metadata.ipAddress ?? 'unknown', action: 'login', reason: 'unknown_user' } });
+        const unverifiedPending = await (this.prisma as any).pendingEmailChange?.findFirst({
+          where: { newEmail: data.email, verifiedAt: null },
+        });
+        if (unverifiedPending) {
+          logger.warn(
+            { email: data.email, userId: unverifiedPending.userId, ipAddress: metadata.ipAddress },
+            'Flagged attempted access to account with unverified email'
+          );
+        }
+        await (this.prisma as any).authAttempt?.create({
+          data: {
+            email: data.email,
+            ipAddress: metadata.ipAddress ?? 'unknown',
+            action: 'login',
+            reason: unverifiedPending ? 'unverified_pending_email' : 'unknown_user',
+          },
+        });
         throw new ValidationError('Invalid email or password');
       }
 
@@ -316,6 +357,7 @@ export class AuthService extends BaseService {
       await (this.prisma as any).authAttempt?.create({ data: { email: data.email, ipAddress: metadata.ipAddress ?? 'unknown', action: 'login', success: true } });
 
       const jti = randomUUID();
+      const csrfToken = generateCsrfToken();
       
       const accessToken = generateAccessToken({
         userId: user.id,
@@ -323,6 +365,7 @@ export class AuthService extends BaseService {
         role: user.role,
         jti,
         authVersion: user.authVersion,
+        csrf: csrfToken,
       });
 
       const refreshToken = generateRefreshToken(user.id, jti, user.authVersion);
@@ -338,6 +381,7 @@ export class AuthService extends BaseService {
         user: { id: user.id, email: user.email, name: user.name, role: user.role },
         accessToken,
         refreshToken,
+        csrfToken,
       };
     });
   }
@@ -345,6 +389,7 @@ export class AuthService extends BaseService {
   async refreshAccessToken(refreshToken: string): Promise<{
     accessToken: string;
     refreshToken: string;
+    csrfToken: string;
   }> {
     return this.executeWithLogging('user.refreshToken', async () => {
       const { verifyRefreshToken } = await import('../../utils/jwt');
@@ -377,12 +422,14 @@ export class AuthService extends BaseService {
 
       // Issue new tokens with new JTI
       const newJti = randomUUID();
+      const csrfToken = generateCsrfToken();
       const newAccessToken = generateAccessToken({
         userId: user.id,
         email: user.email,
         role: user.role,
         jti: newJti,
         authVersion: user.authVersion,
+        csrf: csrfToken,
       });
 
       const newRefreshToken = generateRefreshToken(user.id, newJti, user.authVersion);
@@ -396,6 +443,7 @@ export class AuthService extends BaseService {
       return {
         accessToken: newAccessToken,
         refreshToken: newRefreshToken,
+        csrfToken,
       };
     });
   }
@@ -426,7 +474,7 @@ export class AuthService extends BaseService {
 /**
  * Parse expiry string like "7d", "24h", "3600" to milliseconds
  */
-function parseExpiryToMs(expiryStr: string): number {
+export function parseExpiryToMs(expiryStr: string): number {
   const match = expiryStr.match(/^(\d+)([dhms]?)$/);
   if (!match) return 7 * 24 * 60 * 60 * 1000; // Default 7 days
 

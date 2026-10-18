@@ -4,7 +4,7 @@ import { isFeatureEnabled } from '../../config/features';
 import { logger } from '../../utils/logger';
 import { withJobTracePayload } from '../../lib/requestContext';
 
-export type EmailTemplate = 'verification' | 'password-reset' | 'creator-verification' | 'account-locked' | 'notification';
+export type EmailTemplate = 'verification' | 'password-reset' | 'creator-verification' | 'account-locked' | 'account-deletion-scheduled' | 'notification';
 
 export interface EmailNotification {
   to: string;
@@ -73,6 +73,10 @@ export function renderEmail(template: EmailTemplate, data: Record<string, string
   }
   if (template === 'account-locked') {
     return { subject: 'Your Dorisio account was temporarily locked', html: `<p>Hello ${name},</p><p>We detected repeated failed login attempts. Your account is temporarily locked until ${escape(data.unlockAt ?? 'later')}.</p>` };
+  }
+  if (template === 'account-deletion-scheduled') {
+    const scheduledFor = escape(data.scheduledFor ?? 'in 30 days');
+    return { subject: 'Your Dorisio account deletion is scheduled', html: `<p>Hello ${name},</p><p>We received a request to delete your account. Your account and data are scheduled to be permanently deleted on ${scheduledFor}.</p><p>If you did not request this, or changed your mind, you can cancel the deletion before then: <a href="${link}">Cancel account deletion</a></p>` };
   }
   return { subject: escape(data.subject ?? 'Dorisio notification'), html: `<p>Hello ${name},</p><p>${escape(data.message ?? '')}</p>` };
 }
